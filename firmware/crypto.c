@@ -111,7 +111,8 @@ int gpgMessageSign(HDNode *node, const uint8_t *message, size_t message_len, uin
 	}
 }
 
-static void cryptoMessageHash(const CoinInfo *coin, const uint8_t *message, size_t message_len, uint8_t hash[HASHER_DIGEST_LENGTH]) {
+static void cryptoMessageHash(const CoinInfo *coin, const uint8_t *message, size_t message_len, uint8_t hash[HASHER_DIGEST_LENGTH])
+{
 	Hasher hasher;
 	hasher_Init(&hasher, coin->curve->hasher_sign);
 	hasher_Update(&hasher, (const uint8_t *)coin->signed_message_header, strlen(coin->signed_message_header));
@@ -122,10 +123,109 @@ static void cryptoMessageHash(const CoinInfo *coin, const uint8_t *message, size
 	hasher_Final(&hasher, hash);
 }
 
+static void cryptoMessageHashWithoutHeader(const CoinInfo *coin, const uint8_t *message, size_t message_len, uint8_t hash[HASHER_DIGEST_LENGTH])
+{
+	Hasher hasher;
+	hasher_Init(&hasher, coin->curve->hasher_sign);
+	hasher_Update(&hasher, message, message_len);
+	hasher_Final(&hasher, hash);
+}
+
 int cryptoMessageSign(const CoinInfo *coin, HDNode *node, InputScriptType script_type, const uint8_t *message, size_t message_len, uint8_t *signature)
 {
 	uint8_t hash[HASHER_DIGEST_LENGTH];
 	cryptoMessageHash(coin, message, message_len, hash);
+
+	uint8_t pby;
+	int result = hdnode_sign_digest(node, hash, signature + 1, &pby, NULL);
+	if (result == 0) {
+		switch (script_type) {
+			case InputScriptType_SPENDP2SHWITNESS:
+				// segwit-in-p2sh
+				signature[0] = 35 + pby;
+				break;
+			case InputScriptType_SPENDWITNESS:
+				// segwit
+				signature[0] = 39 + pby;
+				break;
+			default:
+				// p2pkh
+				signature[0] = 31 + pby;
+				break;
+		}
+	}
+	return result;
+}
+
+signed char getHexDigit(char c)
+{
+    unsigned char uc = c;
+    if (uc >= '0' && uc <= '9')
+        return uc - '0';
+    if (uc >= 'A' && uc <= 'F')
+        return uc - 'A' + 10;
+    if (uc >= 'a' && uc <= 'f')
+        return uc - 'a' + 10;
+    
+    return -1;
+}
+
+void serializeTxInput(const uint8_t* psz, uint32_t width, uint32_t nout, uint8_t* data)
+{
+    memset(data, 0, width);
+
+    // // skip leading spaces
+    // while (isspace(*psz))
+    //     psz++;
+
+    // // skip 0x
+    // if (psz[0] == '0' && tolower(psz[1]) == 'x')
+    //     psz += 2;
+
+    // hex string to uint
+    const uint8_t* pbegin = psz;
+    while (getHexDigit(*psz) != -1)
+        psz++;
+    psz--;
+    uint8_t* p1 = data;
+    unsigned char* pend = p1 + width - 4;
+    while (psz >= pbegin && p1 < pend) {
+        *p1 = getHexDigit(*psz--);
+        if (psz >= pbegin) {
+            *p1 |= ((uint8_t)getHexDigit(*psz--) << 4);
+            p1++;
+        }
+    }
+    char* ptrnout = (char*)&nout;
+    for (uint8_t i = 0; i < 4; i++) {
+        *p1 = *(ptrnout + i);
+        p1++;
+    }
+}
+
+int cryptoTxInputSign(const CoinInfo *coin, HDNode *node, InputScriptType script_type, const uint8_t* txinput, size_t txinput_len, uint8_t *signature)
+{
+	uint8_t hash[HASHER_DIGEST_LENGTH];
+
+	uint8_t serialized_txinput[36];
+	const uint8_t* ptrnout = txinput;
+	uint32_t count = 0;
+	while (*ptrnout != ':') {
+		ptrnout++;
+		count++;
+	}
+	ptrnout++;
+	count++;
+
+	uint32_t nout = 0;
+    for (uint32_t i = count; i < txinput_len; i++) {
+        nout *= 10;
+        nout += *(ptrnout + i - count) - '0';
+    }
+	
+	serializeTxInput(txinput, 36, nout, serialized_txinput);
+	
+	cryptoMessageHashWithoutHeader(coin, serialized_txinput, 36, hash);
 
 	uint8_t pby;
 	int result = hdnode_sign_digest(node, hash, signature + 1, &pby, NULL);
